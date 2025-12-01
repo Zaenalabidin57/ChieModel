@@ -6,6 +6,8 @@
 #include <thread>
 #include <filesystem>
 #include <cmath> // For sin() and M_PI
+#include <cstdlib> // For rand() and srand()
+#include <ctime>   // For time()
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_image.h>
 #include <SDL2/SDL_ttf.h>
@@ -22,9 +24,14 @@ const int ANIMATION_FRAMES = 12;  // Number of frames for jump animation
 const double JUMP_HEIGHT = 20.0;  // Maximum jump height in pixels
 const int JUMP_SPEED = 16;       // Animation frame delay in milliseconds
 
+// Blink settings
+const int BLINK_DURATION = 150;      // Duration of blink in milliseconds (shorter for quicker blink)
+const int BLINK_INTERVAL = 3000;    // Time between blinks in milliseconds
+const int BLINK_VARIATION = 1000;   // Random variation in blink interval
+
 // Command line options
 struct Options {
-    bool windowOnly = false;  // Window only mode (no virtual camera)
+    bool windowOnly = true;  // Window only mode (no virtual camera)
     bool help = false;       // Show help message
 };
 
@@ -46,6 +53,7 @@ Options parseArguments(int argc, char* argv[]) {
                       << "Keyboard Controls:\n"
                       << "  1-9, 0       Change avatar pose (body position)\n"
                       << "  Q, W, E, R...  Change facial expression\n"
+                      << "  G            Toggle horizontal flip\n"
                       << "  ESC          Exit application\n\n"
                       << "Note: Press the same key twice to toggle between expression 1\n"
                       << "      and the mapped expression for that key.\n"
@@ -69,7 +77,8 @@ void showHelp(const char* programName) {
     std::cout << "  Q, A, Z: Pose 1 (santai)\n";
     std::cout << "  W, S, X: Pose 3 (satu tangan)\n";
     std::cout << "  E, D, C: Pose 4 (belakang tangan)\n";
-    std::cout << "  R, F, V: Pose 6 (wawa)\n\n";
+    std::cout << "  R, F, V: Pose 6 (wawa)\n";
+    std::cout << "  G: Toggle horizontal flip\n\n";
     std::cout << "  Press the same key twice to toggle between expression 1 and the specific expression\n";
     std::cout << "  Press ESC to exit\n";
 }
@@ -156,8 +165,15 @@ private:
     // State
     int currentPose = 1;
     int currentExpression = 1;
+    bool isFlipped = false;  // Track horizontal flip state
     SDL_Keycode lastKey = 0;
     uint32_t lastKeyTime = 0;
+
+    // Blink state
+    bool isBlinking = false;
+    uint32_t blinkStartTime = 0;
+    uint32_t nextBlinkTime = 0;
+    int expressionBeforeBlink = 1;
     
     // Font for rendering text
     TTF_Font* font = nullptr;
@@ -237,15 +253,40 @@ private:
         srcRect.y = 0;
         srcRect.w = surface->w;
         srcRect.h = surface->h;
-        
+
         SDL_Rect destRect;
         destRect.w = surface->w;
         destRect.h = surface->h;
         destRect.x = (VIRTUAL_CAMERA_WIDTH - surface->w) / 2;
         destRect.y = ((VIRTUAL_CAMERA_HEIGHT - surface->h) / 2) + 50;  // Add 50px offset to move down
-        
-        // Blit the ChieModel onto the green background
-        SDL_BlitSurface(surface, &srcRect, rgbSurface, &destRect);
+
+        // Blit the ChieModel onto the green background with optional flip
+        if (isFlipped) {
+            // For flipping, we need to create a flipped version of the surface
+            SDL_Surface* flippedSurface = SDL_CreateRGBSurface(0, surface->w, surface->h,
+                                                              surface->format->BitsPerPixel,
+                                                              surface->format->Rmask,
+                                                              surface->format->Gmask,
+                                                              surface->format->Bmask,
+                                                              surface->format->Amask);
+            if (flippedSurface) {
+                // Flip the surface horizontally
+                for (int y = 0; y < surface->h; y++) {
+                    for (int x = 0; x < surface->w; x++) {
+                        Uint32* srcPixel = (Uint32*)((Uint8*)surface->pixels + y * surface->pitch + x * surface->format->BytesPerPixel);
+                        Uint32* dstPixel = (Uint32*)((Uint8*)flippedSurface->pixels + y * flippedSurface->pitch + (surface->w - 1 - x) * flippedSurface->format->BytesPerPixel);
+                        *dstPixel = *srcPixel;
+                    }
+                }
+                SDL_BlitSurface(flippedSurface, &srcRect, rgbSurface, &destRect);
+                SDL_FreeSurface(flippedSurface);
+            } else {
+                // Fallback to non-flipped if flip surface creation fails
+                SDL_BlitSurface(surface, &srcRect, rgbSurface, &destRect);
+            }
+        } else {
+            SDL_BlitSurface(surface, &srcRect, rgbSurface, &destRect);
+        }
         
         // Log the first write so we know it's trying to output
         static bool firstWrite = true;
@@ -381,7 +422,10 @@ public:
     
     bool init(Options options) {
         windowOnly = options.windowOnly;
-        
+
+        // Initialize random seed for blink timing
+        srand(static_cast<unsigned int>(time(nullptr)));
+
         // Initialize SDL
         if (SDL_Init(SDL_INIT_VIDEO) < 0) {
             std::cerr << "SDL could not initialize! SDL_Error: " << SDL_GetError() << std::endl;
@@ -527,48 +571,60 @@ public:
     }
     
     SDL_Texture* getCurrentTexture() {
-        ImageKey key = {currentPose, currentExpression};
-        
+        // Determine which expression to show
+        int expressionToShow = currentExpression;
+        if (isBlinking) {
+            expressionToShow = 3; // Show expression 3 (blink) when blinking
+        }
+
+        ImageKey key = {currentPose, expressionToShow};
+
         // Try exact match
         if (images.find(key) != images.end()) {
             return images[key];
         }
-        
+
         // Fall back to default pose with this expression
         key.pose = 1;
         if (images.find(key) != images.end()) {
             return images[key];
         }
-        
+
         // Last resort: default image
         key.expression = 1;
         if (images.find(key) != images.end()) {
             return images[key];
         }
-        
+
         return nullptr;
     }
     
     SDL_Surface* getCurrentSurface() {
-        ImageKey key = {currentPose, currentExpression};
-        
+        // Determine which expression to show
+        int expressionToShow = currentExpression;
+        if (isBlinking) {
+            expressionToShow = 3; // Show expression 3 (blink) when blinking
+        }
+
+        ImageKey key = {currentPose, expressionToShow};
+
         // Try exact match
         if (imageSurfaces.find(key) != imageSurfaces.end()) {
             return imageSurfaces[key];
         }
-        
+
         // Fall back to default pose with this expression
         key.pose = 1;
         if (imageSurfaces.find(key) != imageSurfaces.end()) {
             return imageSurfaces[key];
         }
-        
+
         // Last resort: default image
         key.expression = 1;
         if (imageSurfaces.find(key) != imageSurfaces.end()) {
             return imageSurfaces[key];
         }
-        
+
         return nullptr;
     }
     
@@ -602,24 +658,29 @@ public:
             // Get texture dimensions
             int width, height;
             SDL_QueryTexture(currentTex, nullptr, nullptr, &width, &height);
-            
+
             // Calculate position to center the image in the left part of the screen
             SDL_Rect destRect;
             destRect.w = width;
             destRect.h = height;
             destRect.x = (WINDOW_WIDTH / 3 - width) / 2;
             destRect.y = (WINDOW_HEIGHT - height) / 2;
-            
-            // Render the ChieModel
-            SDL_RenderCopy(renderer, currentTex, nullptr, &destRect);
+
+            // Render the ChieModel with optional horizontal flip
+            if (isFlipped) {
+                SDL_RenderCopyEx(renderer, currentTex, nullptr, &destRect, 0, nullptr, SDL_FLIP_HORIZONTAL);
+            } else {
+                SDL_RenderCopy(renderer, currentTex, nullptr, &destRect);
+            }
         }
         
         // Draw status text
         SDL_Color white = {255, 255, 255, 255};
         std::string poseName = POSES.count(currentPose) ? POSES[currentPose] : std::to_string(currentPose);
-        std::string statusText = "Current Pose: " + std::to_string(currentPose) + 
-                               " (" + poseName + "), Expression: " + 
-                               std::to_string(currentExpression);
+        std::string statusText = "Current Pose: " + std::to_string(currentPose) +
+                               " (" + poseName + "), Expression: " +
+                               std::to_string(currentExpression) +
+                               ", Flip: " + (isFlipped ? "ON" : "OFF");
         renderText(statusText, 20, 20, white);
         
         // Draw controls guide
@@ -635,6 +696,8 @@ public:
         renderText("E, D, C: Pose 4 (belakang tangan)", WINDOW_WIDTH / 2, yPos, white);
         yPos += 30;
         renderText("R, F, V: Pose 6 (wawa)", WINDOW_WIDTH / 2, yPos, white);
+        yPos += 30;
+        renderText("G: Toggle horizontal flip", WINDOW_WIDTH / 2, yPos, white);
         yPos += 30;
         renderText("", WINDOW_WIDTH / 2, yPos, white);
         yPos += 30;
@@ -673,15 +736,19 @@ public:
         // Center the texture in the output window
         // Use same vertical baseline offset as in animations to prevent clipping
         int verticalBaselineOffset = 11;
-        
+
         SDL_Rect destRect;
         destRect.w = width;
         destRect.h = height;
         destRect.x = (VIRTUAL_CAMERA_WIDTH - width) / 2;
         destRect.y = ((VIRTUAL_CAMERA_HEIGHT - height) / 2) + 50 + verticalBaselineOffset;
-        
-        // Render the texture
-        SDL_RenderCopy(outputRenderer, outputTexture, nullptr, &destRect);
+
+        // Render the texture with optional horizontal flip
+        if (isFlipped) {
+            SDL_RenderCopyEx(outputRenderer, outputTexture, nullptr, &destRect, 0, nullptr, SDL_FLIP_HORIZONTAL);
+        } else {
+            SDL_RenderCopy(outputRenderer, outputTexture, nullptr, &destRect);
+        }
         SDL_RenderPresent(outputRenderer);
         
         // Clean up
@@ -689,6 +756,23 @@ public:
     }
     
     void handleKeyPress(SDL_Keycode key) {
+        // Handle 'g' key for horizontal flip
+        if (key == SDLK_g) {
+            isFlipped = !isFlipped;
+            std::cout << "Toggled horizontal flip: " << (isFlipped ? "ON" : "OFF") << std::endl;
+
+            // Update output depending on mode (virtual camera or window)
+            SDL_Surface* surface = getCurrentSurface();
+            if (surface) {
+                if (!windowOnly && cameraFd >= 0) {
+                    sendToVirtualCamera(surface);
+                } else if (windowOnly) {
+                    updateOutputWindow(surface);
+                }
+            }
+            return;
+        }
+
         // Check if key is mapped
         if (KEY_MAPPINGS.find(key) == KEY_MAPPINGS.end()) {
             return;
@@ -870,10 +954,14 @@ public:
         if (windowOnly) {
             std::cout << "Running in window-only mode (with output preview window)" << std::endl;
         }
-        
+
+        // Initialize blink timing
+        uint32_t currentTime = SDL_GetTicks();
+        nextBlinkTime = currentTime + BLINK_INTERVAL + (rand() % BLINK_VARIATION);
+
         // Initial update
         drawControlPanel();
-        
+
         // Send initial image to camera if not in window-only mode
         // or update output window if in window-only mode
         SDL_Surface* initialSurface = getCurrentSurface();
@@ -884,11 +972,26 @@ public:
                 updateOutputWindow(initialSurface);
             }
         }
-        
+
         bool running = true;
         SDL_Event event;
-        
+
         while (running) {
+            currentTime = SDL_GetTicks();
+
+            // Update blink state
+            if (!isBlinking && currentTime >= nextBlinkTime) {
+                // Start blinking
+                isBlinking = true;
+                blinkStartTime = currentTime;
+                expressionBeforeBlink = currentExpression;
+            } else if (isBlinking && currentTime >= blinkStartTime + BLINK_DURATION) {
+                // Stop blinking
+                isBlinking = false;
+                // Schedule next blink
+                nextBlinkTime = currentTime + BLINK_INTERVAL + (rand() % BLINK_VARIATION);
+            }
+
             // Process events
             while (SDL_PollEvent(&event)) {
                 if (event.type == SDL_QUIT) {
@@ -899,7 +1002,6 @@ public:
                         running = false;
                     } else {
                         // Check for key cooldown to prevent multiple triggers
-                        uint32_t currentTime = SDL_GetTicks();
                         if (currentTime - lastKeyTime > KEY_COOLDOWN) {
                             handleKeyPress(event.key.keysym.sym);
                             drawControlPanel();
@@ -908,7 +1010,17 @@ public:
                     }
                 }
             }
-            
+
+            // Update output every frame for smooth blinking animation
+            SDL_Surface* surface = getCurrentSurface();
+            if (surface) {
+                if (!windowOnly && cameraFd >= 0) {
+                    sendToVirtualCamera(surface);
+                } else if (windowOnly) {
+                    updateOutputWindow(surface);
+                }
+            }
+
             // Limit frame rate
             SDL_Delay(16); // About 60 FPS
         }
