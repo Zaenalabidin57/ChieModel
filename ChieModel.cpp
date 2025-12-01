@@ -13,11 +13,6 @@
 #include <SDL2/SDL_ttf.h>
 #include "embedded_models.h"
 
-// Linux-specific headers for v4l2loopback virtual camera
-#include <fcntl.h>
-#include <unistd.h>
-#include <sys/ioctl.h>
-#include <linux/videodev2.h>
 
 // Animation settings
 const int ANIMATION_FRAMES = 12;  // Number of frames for jump animation
@@ -31,24 +26,20 @@ const int BLINK_VARIATION = 1000;   // Random variation in blink interval
 
 // Command line options
 struct Options {
-    bool windowOnly = true;  // Window only mode (no virtual camera)
     bool help = false;       // Show help message
 };
 
 // Parse command line arguments
 Options parseArguments(int argc, char* argv[]) {
     Options options;
-    
+
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
-        
-        if (arg == "--window") {
-            options.windowOnly = true;
-        } else if (arg == "--help" || arg == "-h") {
+
+        if (arg == "--help" || arg == "-h") {
             std::cout << "ChieModel - 2D Virtual Avatar System\n"
                       << "Usage: ChieModel [options]\n\n"
                       << "Options:\n"
-                      << "  --window     Run in window-only mode (no virtual camera)\n"
                       << "  --help, -h   Show this help message\n\n"
                       << "Keyboard Controls:\n"
                       << "  1-9, 0       Change avatar pose (body position)\n"
@@ -58,10 +49,10 @@ Options parseArguments(int argc, char* argv[]) {
                       << "Note: Press the same key twice to toggle between expression 1\n"
                       << "      and the mapped expression for that key.\n"
                       << std::endl;
-            return options;
+            options.help = true;
         }
     }
-    
+
     return options;
 }
 
@@ -71,7 +62,6 @@ void showHelp(const char* programName) {
     std::cout << "===================\n\n";
     std::cout << "Usage: " << programName << " [OPTIONS]\n\n";
     std::cout << "Options:\n";
-    std::cout << "  -w, --window    Run in window-only mode (no virtual camera)\n";
     std::cout << "  -h, --help      Show this help message\n\n";
     std::cout << "Keyboard Controls:\n";
     std::cout << "  Q, A, Z: Pose 1 (santai)\n";
@@ -84,8 +74,6 @@ void showHelp(const char* programName) {
 }
 
 // Configuration
-const int VIRTUAL_CAMERA_WIDTH = 1280;
-const int VIRTUAL_CAMERA_HEIGHT = 720;
 const int WINDOW_WIDTH = 800;
 const int WINDOW_HEIGHT = 600;
 
@@ -151,17 +139,14 @@ private:
     SDL_Window* outputWindow = nullptr;  // Output preview window
     SDL_Renderer* outputRenderer = nullptr; // Output preview renderer
     SDL_Texture* currentTexture = nullptr;
-    
-    // Virtual camera
-    int cameraFd = -1;
-    
+
     // Loaded images
     std::map<ImageKey, SDL_Texture*> images;
     std::map<ImageKey, SDL_Surface*> imageSurfaces; // For camera output
-    
+
     // Animation frames
     std::map<std::pair<int, int>, std::vector<SDL_Surface*>> animationFrames; // Maps start_pose->end_pose to frames
-    
+
     // State
     int currentPose = 1;
     int currentExpression = 1;
@@ -174,32 +159,29 @@ private:
     uint32_t blinkStartTime = 0;
     uint32_t nextBlinkTime = 0;
     int expressionBeforeBlink = 1;
-    
+
     // Font for rendering text
     TTF_Font* font = nullptr;
     
-    // Options
-    bool windowOnly = false;
-    
     // Helper function to create a fallback image
     SDL_Texture* createFallbackTexture() {
-        SDL_Surface* surface = SDL_CreateRGBSurface(0, VIRTUAL_CAMERA_WIDTH, VIRTUAL_CAMERA_HEIGHT, 
+        SDL_Surface* surface = SDL_CreateRGBSurface(0, WINDOW_WIDTH, WINDOW_HEIGHT,
                                                  32, 0, 0, 0, 0);
         if (!surface) {
             std::cerr << "Failed to create fallback surface: " << SDL_GetError() << std::endl;
             return nullptr;
         }
-        
+
         // Fill with green
-        SDL_FillRect(surface, nullptr, SDL_MapRGB(surface->format, 
-                                                BACKGROUND_COLOR.r, 
-                                                BACKGROUND_COLOR.g, 
+        SDL_FillRect(surface, nullptr, SDL_MapRGB(surface->format,
+                                                BACKGROUND_COLOR.r,
+                                                BACKGROUND_COLOR.g,
                                                 BACKGROUND_COLOR.b));
-        
+
         // Create texture from surface
         SDL_Texture* texture = SDL_CreateTextureFromSurface(renderer, surface);
         SDL_FreeSurface(surface);
-        
+
         return texture;
     }
     
@@ -222,207 +204,14 @@ private:
         return modelDir + "/" + filename;
     }
     
-    // Send image to virtual camera
-    void sendToVirtualCamera(SDL_Surface* surface) {
-        // Skip if we're in window-only mode or the camera is not initialized
-        if (windowOnly || cameraFd < 0 || !surface) {
-            return;
-        }
-        
-        // Create a fresh RGB surface with the correct dimensions and format
-        SDL_Surface* rgbSurface = SDL_CreateRGBSurface(0, 
-                                                       VIRTUAL_CAMERA_WIDTH, 
-                                                       VIRTUAL_CAMERA_HEIGHT, 
-                                                       24,  // 24 bits per pixel (RGB)
-                                                       0xFF0000, 0x00FF00, 0x0000FF, 0); // RGB masks
-        
-        if (!rgbSurface) {
-            std::cerr << "Failed to create RGB surface: " << SDL_GetError() << std::endl;
-            return;
-        }
-        
-        // Fill with green background
-        SDL_FillRect(rgbSurface, nullptr, SDL_MapRGB(rgbSurface->format, 
-                                                  BACKGROUND_COLOR.r, 
-                                                  BACKGROUND_COLOR.g, 
-                                                  BACKGROUND_COLOR.b));
-        
-        // Center the ChieModel image on the green background with a vertical offset
-        SDL_Rect srcRect;
-        srcRect.x = 0;
-        srcRect.y = 0;
-        srcRect.w = surface->w;
-        srcRect.h = surface->h;
-
-        SDL_Rect destRect;
-        destRect.w = surface->w;
-        destRect.h = surface->h;
-        destRect.x = (VIRTUAL_CAMERA_WIDTH - surface->w) / 2;
-        destRect.y = ((VIRTUAL_CAMERA_HEIGHT - surface->h) / 2) + 50;  // Add 50px offset to move down
-
-        // Blit the ChieModel onto the green background with optional flip
-        if (isFlipped) {
-            // For flipping, we need to create a flipped version of the surface
-            SDL_Surface* flippedSurface = SDL_CreateRGBSurface(0, surface->w, surface->h,
-                                                              surface->format->BitsPerPixel,
-                                                              surface->format->Rmask,
-                                                              surface->format->Gmask,
-                                                              surface->format->Bmask,
-                                                              surface->format->Amask);
-            if (flippedSurface) {
-                // Flip the surface horizontally
-                for (int y = 0; y < surface->h; y++) {
-                    for (int x = 0; x < surface->w; x++) {
-                        Uint32* srcPixel = (Uint32*)((Uint8*)surface->pixels + y * surface->pitch + x * surface->format->BytesPerPixel);
-                        Uint32* dstPixel = (Uint32*)((Uint8*)flippedSurface->pixels + y * flippedSurface->pitch + (surface->w - 1 - x) * flippedSurface->format->BytesPerPixel);
-                        *dstPixel = *srcPixel;
-                    }
-                }
-                SDL_BlitSurface(flippedSurface, &srcRect, rgbSurface, &destRect);
-                SDL_FreeSurface(flippedSurface);
-            } else {
-                // Fallback to non-flipped if flip surface creation fails
-                SDL_BlitSurface(surface, &srcRect, rgbSurface, &destRect);
-            }
-        } else {
-            SDL_BlitSurface(surface, &srcRect, rgbSurface, &destRect);
-        }
-        
-        // Log the first write so we know it's trying to output
-        static bool firstWrite = true;
-        if (firstWrite) {
-            std::cout << "Sending first frame to virtual camera (fd=" << cameraFd << ")" << std::endl;
-            std::cout << "Surface format: " << SDL_GetPixelFormatName(rgbSurface->format->format) << std::endl;
-            std::cout << "Surface dimensions: " << rgbSurface->w << "x" << rgbSurface->h << std::endl;
-            std::cout << "Surface pitch: " << rgbSurface->pitch << std::endl;
-            std::cout << "Surface bytes per pixel: " << (int)rgbSurface->format->BytesPerPixel << std::endl;
-            firstWrite = false;
-        }
-        
-        // Create buffer with packed RGB data for the camera
-        uint8_t* buffer = new uint8_t[VIRTUAL_CAMERA_WIDTH * VIRTUAL_CAMERA_HEIGHT * 3];
-        
-        // Fill the buffer with RGB data from the surface
-        for (int y = 0; y < VIRTUAL_CAMERA_HEIGHT; y++) {
-            for (int x = 0; x < VIRTUAL_CAMERA_WIDTH; x++) {
-                // Get pixel color at this position
-                Uint32 pixel;
-                Uint8* p = (Uint8*)rgbSurface->pixels + y * rgbSurface->pitch + x * rgbSurface->format->BytesPerPixel;
-                
-                // Get RGB values
-                Uint8 r, g, b;
-                if (rgbSurface->format->BytesPerPixel == 3) {
-                    // 24-bit format
-                    r = p[0];
-                    g = p[1];
-                    b = p[2];
-                } else {
-                    // Convert from pixel format
-                    pixel = *(Uint32*)p;
-                    SDL_GetRGB(pixel, rgbSurface->format, &r, &g, &b);
-                }
-                
-                // Store in the output buffer - v4l2loopback actually expects BGR
-                int bufferIndex = (y * VIRTUAL_CAMERA_WIDTH + x) * 3;
-                buffer[bufferIndex] = b;     // Blue first
-                buffer[bufferIndex + 1] = g;  // Green second
-                buffer[bufferIndex + 2] = r;  // Red third
-            }
-        }
-        
-        // Write the buffer to the camera
-        size_t bufferSize = VIRTUAL_CAMERA_WIDTH * VIRTUAL_CAMERA_HEIGHT * 3;
-        ssize_t written = write(cameraFd, buffer, bufferSize);
-        
-        if (written < 0) {
-            std::cerr << "Failed to write to camera: " << strerror(errno) << std::endl;
-        } else if (written < (ssize_t)bufferSize) {
-            std::cerr << "Partial write to camera: " << written << " of " << bufferSize << " bytes" << std::endl;
-        }
-        
-        // Clean up
-        delete[] buffer;
-        SDL_FreeSurface(rgbSurface);
-    }
-    
-    // Initialize the virtual camera
-    bool initVirtualCamera() {
-        // Try multiple possible video devices
-        std::vector<std::string> possibleDevices = {
-            "/dev/video0", "/dev/video1", "/dev/video2", "/dev/video3", "/dev/video4", "/dev/video5"
-        };
-        
-        // Find a v4l2loopback device
-        for (const auto& devicePath : possibleDevices) {
-            // Check if device exists
-            if (!std::filesystem::exists(devicePath)) {
-                continue;
-            }
-            
-            // Try to open the device
-            cameraFd = open(devicePath.c_str(), O_WRONLY);
-            if (cameraFd < 0) {
-                std::cerr << "Failed to open device: " << devicePath << std::endl;
-                continue;
-            }
-            
-            // Check if it's a video device
-            struct v4l2_capability cap;
-            if (ioctl(cameraFd, VIDIOC_QUERYCAP, &cap) < 0) {
-                std::cerr << "Failed to query capabilities of device: " << devicePath << std::endl;
-                close(cameraFd);
-                cameraFd = -1;
-                continue;
-            }
-            
-            // Check if we can write to this device
-            if (!(cap.capabilities & V4L2_CAP_VIDEO_OUTPUT)) {
-                std::cerr << "Device does not support video output: " << devicePath << std::endl;
-                close(cameraFd);
-                cameraFd = -1;
-                continue;
-            }
-            
-            // Set the video format
-            struct v4l2_format format;
-            memset(&format, 0, sizeof(format));
-            format.type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
-            format.fmt.pix.width = VIRTUAL_CAMERA_WIDTH;
-            format.fmt.pix.height = VIRTUAL_CAMERA_HEIGHT;
-            format.fmt.pix.pixelformat = V4L2_PIX_FMT_RGB24;
-            format.fmt.pix.field = V4L2_FIELD_NONE;
-            format.fmt.pix.bytesperline = VIRTUAL_CAMERA_WIDTH * 3;
-            format.fmt.pix.sizeimage = VIRTUAL_CAMERA_WIDTH * VIRTUAL_CAMERA_HEIGHT * 3;
-            
-            if (ioctl(cameraFd, VIDIOC_S_FMT, &format) < 0) {
-                std::cerr << "Failed to set format on device: " << devicePath << " (" << strerror(errno) << ")" << std::endl;
-                close(cameraFd);
-                cameraFd = -1;
-                continue;
-            }
-            
-            // Successfully set up the camera
-            std::cout << "Virtual camera initialized on device: " << devicePath << std::endl;
-            std::cout << "Using driver: " << cap.driver << std::endl;
-            std::cout << "Card: " << cap.card << std::endl;
-            return true;
-        }
-        
-        std::cerr << "Failed to find a usable v4l2loopback device." << std::endl;
-        std::cerr << "Please ensure v4l2loopback is loaded with: sudo modprobe v4l2loopback" << std::endl;
-        return false;
-    }
-    
 public:
     AvatarSystem() {}
-    
+
     ~AvatarSystem() {
         shutdown();
     }
     
     bool init(Options options) {
-        windowOnly = options.windowOnly;
-
         // Initialize random seed for blink timing
         srand(static_cast<unsigned int>(time(nullptr)));
 
@@ -431,86 +220,80 @@ public:
             std::cerr << "SDL could not initialize! SDL_Error: " << SDL_GetError() << std::endl;
             return false;
         }
-        
+
         // Initialize SDL_image
         int imgFlags = IMG_INIT_PNG;
         if (!(IMG_Init(imgFlags) & imgFlags)) {
             std::cerr << "SDL_image could not initialize! SDL_image Error: " << IMG_GetError() << std::endl;
             return false;
         }
-        
+
         // Initialize TTF
         if (TTF_Init() < 0) {
             std::cerr << "SDL_ttf could not initialize! SDL_ttf Error: " << TTF_GetError() << std::endl;
             return false;
         }
-        
+
         // Load font
         font = TTF_OpenFont("fonts/FreeMono.otf", 16);
         if (!font) {
             std::cerr << "Failed to load font! SDL_ttf Error: " << TTF_GetError() << std::endl;
             // Continue without font - we'll use plain rectangles for UI
         }
-        
-        // Create window
-        window = SDL_CreateWindow("ChieModel Control", 
-                               SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, 
-                               WINDOW_WIDTH, WINDOW_HEIGHT, 
+
+        // Create control window
+        window = SDL_CreateWindow("ChieModel Control",
+                               SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
+                               WINDOW_WIDTH, WINDOW_HEIGHT,
                                SDL_WINDOW_SHOWN);
         if (!window) {
             std::cerr << "Window could not be created! SDL_Error: " << SDL_GetError() << std::endl;
             return false;
         }
-        
-        // Create renderer
+
+        // Create renderer for control window
         renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
         if (!renderer) {
             std::cerr << "Renderer could not be created! SDL_Error: " << SDL_GetError() << std::endl;
             return false;
         }
-        
-        // Create output preview window when in window-only mode
-        if (windowOnly) {
-            outputWindow = SDL_CreateWindow("ChieModel Output", 
-                                         SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, 
-                                         VIRTUAL_CAMERA_WIDTH, VIRTUAL_CAMERA_HEIGHT, 
-                                         SDL_WINDOW_SHOWN);
-            if (!outputWindow) {
-                std::cerr << "Output window could not be created! SDL_Error: " << SDL_GetError() << std::endl;
-                // Continue without output window
-            } else {
-                // Create output renderer
-                outputRenderer = SDL_CreateRenderer(outputWindow, -1, SDL_RENDERER_ACCELERATED);
-                if (!outputRenderer) {
-                    std::cerr << "Output renderer could not be created! SDL_Error: " << SDL_GetError() << std::endl;
-                    SDL_DestroyWindow(outputWindow);
-                    outputWindow = nullptr;
-                }
-            }
+
+        // Create output preview window
+        outputWindow = SDL_CreateWindow("ChieModel Output",
+                                     SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
+                                     WINDOW_WIDTH, WINDOW_HEIGHT,
+                                     SDL_WINDOW_SHOWN);
+        if (!outputWindow) {
+            std::cerr << "Output window could not be created! SDL_Error: " << SDL_GetError() << std::endl;
+            return false;
         }
-        
+
+        // Create output renderer
+        outputRenderer = SDL_CreateRenderer(outputWindow, -1, SDL_RENDERER_ACCELERATED);
+        if (!outputRenderer) {
+            std::cerr << "Output renderer could not be created! SDL_Error: " << SDL_GetError() << std::endl;
+            SDL_DestroyWindow(outputWindow);
+            outputWindow = nullptr;
+            return false;
+        }
+
         // Create model directory if it doesn't exist
         std::filesystem::path exePath = std::filesystem::canonical("/proc/self/exe");
         std::filesystem::path exeDir = exePath.parent_path();
         std::filesystem::path modelDir = exeDir / "model";
-        
+
         if (!std::filesystem::exists(modelDir)) {
             std::filesystem::create_directory(modelDir);
             std::cout << "Created directory: " << modelDir.string() << std::endl;
             std::cout << "Please place your ChieModel images in this directory" << std::endl;
         }
-        
-        // Initialize virtual camera if not in window-only mode
-        if (!windowOnly) {
-            initVirtualCamera();
-        }
-        
+
         // Load all ChieModel images
         loadImages();
-        
+
         // Generate animation frames for pose transitions
         generateAnimationFrames();
-        
+
         return true;
     }
     
@@ -558,13 +341,13 @@ public:
             std::cerr << "Warning: No ChieModel images were loaded!" << std::endl;
             ImageKey defaultKey = {1, 1};
             images[defaultKey] = createFallbackTexture();
-            
-            // Create fallback surface for camera
-            SDL_Surface* surface = SDL_CreateRGBSurface(0, VIRTUAL_CAMERA_WIDTH, VIRTUAL_CAMERA_HEIGHT, 
+
+            // Create fallback surface for output
+            SDL_Surface* surface = SDL_CreateRGBSurface(0, WINDOW_WIDTH, WINDOW_HEIGHT,
                                                      32, 0, 0, 0, 0);
-            SDL_FillRect(surface, nullptr, SDL_MapRGB(surface->format, 
-                                                  BACKGROUND_COLOR.r, 
-                                                  BACKGROUND_COLOR.g, 
+            SDL_FillRect(surface, nullptr, SDL_MapRGB(surface->format,
+                                                  BACKGROUND_COLOR.r,
+                                                  BACKGROUND_COLOR.g,
                                                   BACKGROUND_COLOR.b));
             imageSurfaces[defaultKey] = surface;
         }
@@ -710,38 +493,35 @@ public:
     }
     
     void updateOutputWindow(SDL_Surface* surface) {
-        if (!windowOnly || !outputWindow || !outputRenderer || !surface) {
+        if (!outputWindow || !outputRenderer || !surface) {
             return;
         }
-        
+
         // Clear the output renderer
-        SDL_SetRenderDrawColor(outputRenderer, 
-                             BACKGROUND_COLOR.r, 
-                             BACKGROUND_COLOR.g, 
-                             BACKGROUND_COLOR.b, 
+        SDL_SetRenderDrawColor(outputRenderer,
+                             BACKGROUND_COLOR.r,
+                             BACKGROUND_COLOR.g,
+                             BACKGROUND_COLOR.b,
                              BACKGROUND_COLOR.a);
         SDL_RenderClear(outputRenderer);
-        
+
         // Create texture from surface
         SDL_Texture* outputTexture = SDL_CreateTextureFromSurface(outputRenderer, surface);
         if (!outputTexture) {
             std::cerr << "Failed to create output texture" << std::endl;
             return;
         }
-        
+
         // Get texture dimensions
         int width, height;
         SDL_QueryTexture(outputTexture, nullptr, nullptr, &width, &height);
-        
-        // Center the texture in the output window
-        // Use same vertical baseline offset as in animations to prevent clipping
-        int verticalBaselineOffset = 11;
 
+        // Center the texture in the output window
         SDL_Rect destRect;
         destRect.w = width;
         destRect.h = height;
-        destRect.x = (VIRTUAL_CAMERA_WIDTH - width) / 2;
-        destRect.y = ((VIRTUAL_CAMERA_HEIGHT - height) / 2) + 50 + verticalBaselineOffset;
+        destRect.x = (WINDOW_WIDTH - width) / 2;
+        destRect.y = (WINDOW_HEIGHT - height) / 2;
 
         // Render the texture with optional horizontal flip
         if (isFlipped) {
@@ -750,7 +530,7 @@ public:
             SDL_RenderCopy(outputRenderer, outputTexture, nullptr, &destRect);
         }
         SDL_RenderPresent(outputRenderer);
-        
+
         // Clean up
         SDL_DestroyTexture(outputTexture);
     }
@@ -761,14 +541,10 @@ public:
             isFlipped = !isFlipped;
             std::cout << "Toggled horizontal flip: " << (isFlipped ? "ON" : "OFF") << std::endl;
 
-            // Update output depending on mode (virtual camera or window)
+            // Update output window
             SDL_Surface* surface = getCurrentSurface();
             if (surface) {
-                if (!windowOnly && cameraFd >= 0) {
-                    sendToVirtualCamera(surface);
-                } else if (windowOnly) {
-                    updateOutputWindow(surface);
-                }
+                updateOutputWindow(surface);
             }
             return;
         }
@@ -817,15 +593,11 @@ public:
         }
         
         lastKey = key;
-        
-        // Update output depending on mode (virtual camera or window)
+
+        // Update output window
         SDL_Surface* surface = getCurrentSurface();
         if (surface) {
-            if (!windowOnly && cameraFd >= 0) {
-                sendToVirtualCamera(surface);
-            } else if (windowOnly) {
-                updateOutputWindow(surface);
-            }
+            updateOutputWindow(surface);
         }
     }
     
@@ -869,15 +641,11 @@ public:
                     
                     // Calculate jump height using sine wave for smooth arc
                     double jumpOffset = JUMP_HEIGHT * sin(progress * M_PI);
-                    
-                    // Adjust vertical baseline to ensure head doesn't get clipped during jump
-                    // We need to move the baseline down when jumping to keep the whole ChieModel visible
-                    int verticalBaselineOffset = 30; // Reduced from 100 to position ChieModel higher
-                    
+
                     // Create a new surface with green background
-                    SDL_Surface* animFrame = SDL_CreateRGBSurface(0, 
-                                                                VIRTUAL_CAMERA_WIDTH, 
-                                                                VIRTUAL_CAMERA_HEIGHT, 
+                    SDL_Surface* animFrame = SDL_CreateRGBSurface(0,
+                                                                WINDOW_WIDTH,
+                                                                WINDOW_HEIGHT,
                                                                 32, 0, 0, 0, 0);
                     
                     // Fill with green
@@ -899,8 +667,8 @@ public:
                     SDL_Rect destRect;
                     destRect.w = sourceSurface->w;
                     destRect.h = sourceSurface->h;
-                    destRect.x = (VIRTUAL_CAMERA_WIDTH - sourceSurface->w) / 2;
-                    destRect.y = ((VIRTUAL_CAMERA_HEIGHT - sourceSurface->h) / 2) + 50 - static_cast<int>(jumpOffset) + verticalBaselineOffset;
+                    destRect.x = (WINDOW_WIDTH - sourceSurface->w) / 2;
+                    destRect.y = (WINDOW_HEIGHT - sourceSurface->h) / 2 - static_cast<int>(jumpOffset);
                     
                     // Blit the image onto the frame
                     SDL_BlitSurface(sourceSurface, &srcRect, animFrame, &destRect);
@@ -929,12 +697,8 @@ public:
         
         // Play each frame
         for (const auto& frame : frames) {
-            // Send to virtual camera or update output window
-            if (!windowOnly && cameraFd >= 0) {
-                sendToVirtualCamera(frame);
-            } else if (windowOnly) {
-                updateOutputWindow(frame);
-            }
+            // Update output window
+            updateOutputWindow(frame);
             
             // Process events to keep UI responsive
             SDL_Event event;
@@ -951,9 +715,6 @@ public:
     
     void run() {
         std::cout << "ChieModel system ready. Press keys to change expressions, ESC to exit." << std::endl;
-        if (windowOnly) {
-            std::cout << "Running in window-only mode (with output preview window)" << std::endl;
-        }
 
         // Initialize blink timing
         uint32_t currentTime = SDL_GetTicks();
@@ -962,15 +723,10 @@ public:
         // Initial update
         drawControlPanel();
 
-        // Send initial image to camera if not in window-only mode
-        // or update output window if in window-only mode
+        // Update output window with initial image
         SDL_Surface* initialSurface = getCurrentSurface();
         if (initialSurface) {
-            if (!windowOnly && cameraFd >= 0) {
-                sendToVirtualCamera(initialSurface);
-            } else if (windowOnly) {
-                updateOutputWindow(initialSurface);
-            }
+            updateOutputWindow(initialSurface);
         }
 
         bool running = true;
@@ -1014,11 +770,7 @@ public:
             // Update output every frame for smooth blinking animation
             SDL_Surface* surface = getCurrentSurface();
             if (surface) {
-                if (!windowOnly && cameraFd >= 0) {
-                    sendToVirtualCamera(surface);
-                } else if (windowOnly) {
-                    updateOutputWindow(surface);
-                }
+                updateOutputWindow(surface);
             }
 
             // Limit frame rate
@@ -1054,12 +806,6 @@ public:
             }
         }
         animationFrames.clear();
-        
-        // Close the virtual camera
-        if (cameraFd >= 0) {
-            close(cameraFd);
-            cameraFd = -1;
-        }
         
         // Free font
         if (font) {
