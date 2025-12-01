@@ -131,35 +131,6 @@ struct ImageKey {
     }
 };
 
-class TextureCache {
-private:
-    SDL_Texture* cachedOutputTexture = nullptr;
-    bool needsUpdate = true;
-
-public:
-    void markNeedsUpdate() { needsUpdate = true; }
-
-    SDL_Texture* getOrCreateOutputTexture(SDL_Renderer* renderer, SDL_Surface* surface) {
-        if (!needsUpdate && cachedOutputTexture) {
-            return cachedOutputTexture;
-        }
-
-        if (cachedOutputTexture) {
-            SDL_DestroyTexture(cachedOutputTexture);
-        }
-
-        cachedOutputTexture = SDL_CreateTextureFromSurface(renderer, surface);
-        needsUpdate = false;
-        return cachedOutputTexture;
-    }
-
-    ~TextureCache() {
-        if (cachedOutputTexture) {
-            SDL_DestroyTexture(cachedOutputTexture);
-        }
-    }
-};
-
 class AvatarSystem {
 private:
     // SDL components
@@ -191,11 +162,6 @@ private:
 
     // Font for rendering text
     TTF_Font* font = nullptr;
-
-    // Performance optimization: texture cache
-    SDL_Texture* cachedOutputTexture = nullptr;
-    bool needsTextureUpdate = true;
-    TextureCache textureCache;
     
     // Helper function to create a fallback image
     SDL_Texture* createFallbackTexture() {
@@ -540,7 +506,7 @@ public:
         SDL_RenderClear(outputRenderer);
 
         // Create texture from surface
-        SDL_Texture* outputTexture = textureCache.getOrCreateOutputTexture(outputRenderer, surface);
+        SDL_Texture* outputTexture = SDL_CreateTextureFromSurface(outputRenderer, surface);
         if (!outputTexture) {
             std::cerr << "Failed to create output texture" << std::endl;
             return;
@@ -566,6 +532,7 @@ public:
         SDL_RenderPresent(outputRenderer);
 
         // Clean up
+        SDL_DestroyTexture(outputTexture);
     }
     
     void handleKeyPress(SDL_Keycode key) {
@@ -573,7 +540,6 @@ public:
         if (key == SDLK_g) {
             isFlipped = !isFlipped;
             std::cout << "Toggled horizontal flip: " << (isFlipped ? "ON" : "OFF") << std::endl;
-            needsTextureUpdate = true;
 
             // Update output window
             SDL_Surface* surface = getCurrentSurface();
@@ -600,7 +566,6 @@ public:
                 if (currentExpression == 1) {
                     // If currently at expression 1, switch to the mapped expression
                     currentExpression = newExpression;
-        textureCache.markNeedsUpdate();
                     std::cout << "Toggled to Pose " << newPose << ", Expression " << newExpression << std::endl;
                 } else {
                     // If at any other expression, switch to expression 1
@@ -610,7 +575,6 @@ public:
             } else {
                 // First press of a different key for this pose, set to the mapped expression
                 currentExpression = newExpression;
-        textureCache.markNeedsUpdate();
                 std::cout << "Changed to Pose " << newPose << ", Expression " << newExpression << std::endl;
             }
         } else {
@@ -623,7 +587,6 @@ public:
             // Update the state
             currentPose = newPose;
             currentExpression = newExpression;
-        textureCache.markNeedsUpdate();
             
             // Play animation for pose transition
             playPoseAnimation(oldPose, newPose);
@@ -847,7 +810,6 @@ public:
         // Free font
         if (font) {
             TTF_CloseFont(font);
-    // Texture cache is automatically cleaned up by destructor
             font = nullptr;
         }
         
